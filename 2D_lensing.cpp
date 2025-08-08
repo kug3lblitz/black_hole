@@ -32,6 +32,12 @@ struct Engine {
     float zoom = 1.0f;
     bool middleMousePressed = false;
     double lastMouseX = 0.0, lastMouseY = 0;
+    
+    // Mouse callback functions
+    static void mouseCallback(GLFWwindow* window, double xpos, double ypos);
+    static void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
+    static void scrollCallback(GLFWwindow* window, double xoffset, double yoffset);
+    static void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
 
     Engine() {
         if (!glfwInit()) {
@@ -52,20 +58,35 @@ struct Engine {
             glfwTerminate();
             exit(EXIT_FAILURE);
         }
-        glViewport(0, 0, WIDTH, HEIGHT);;
+        glViewport(0, 0, WIDTH, HEIGHT);
+        
+        // Set up callbacks
+        glfwSetWindowUserPointer(window, this);
+        glfwSetCursorPosCallback(window, mouseCallback);
+        glfwSetMouseButtonCallback(window, mouseButtonCallback);
+        glfwSetScrollCallback(window, scrollCallback);
+        glfwSetKeyCallback(window, keyCallback);
     }
 
     void run() {
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glMatrixMode(GL_PROJECTION);
         glLoadIdentity();
-        double left   = -width + offsetX;
-        double right  =  width + offsetX;
-        double bottom = -height + offsetY;
-        double top    =  height + offsetY;
+        double left   = (-width + offsetX) / zoom;
+        double right  = (width + offsetX) / zoom;
+        double bottom = (-height + offsetY) / zoom;
+        double top    = (height + offsetY) / zoom;
         glOrtho(left, right, bottom, top, -1.0, 1.0);
         glMatrixMode(GL_MODELVIEW);
         glLoadIdentity();
+    }
+    
+    vec2 screenToWorld(double x, double y) {
+        double normalizedX = (x / WIDTH) * 2.0 - 1.0;
+        double normalizedY = 1.0 - (y / HEIGHT) * 2.0;
+        double worldX = normalizedX * width / zoom + offsetX;
+        double worldY = normalizedY * height / zoom + offsetY;
+        return vec2(worldX, worldY);
     }
 };
 Engine engine;
@@ -211,9 +232,75 @@ void rk4Step(Ray& ray, double dλ, double rs) {
     ray.dphi += (dλ/6.0)*(k1[3] + 2*k2[3] + 2*k3[3] + k4[3]);
 }
 
+// Callback implementations
+void Engine::mouseCallback(GLFWwindow* window, double xpos, double ypos) {
+    Engine* engine = static_cast<Engine*>(glfwGetWindowUserPointer(window));
+    
+    if (engine->middleMousePressed) {
+        double dx = xpos - engine->lastMouseX;
+        double dy = ypos - engine->lastMouseY;
+        engine->offsetX -= dx * engine->width * 2.0 / engine->WIDTH / engine->zoom;
+        engine->offsetY += dy * engine->height * 2.0 / engine->HEIGHT / engine->zoom;
+    }
+    
+    engine->lastMouseX = xpos;
+    engine->lastMouseY = ypos;
+}
+
+void Engine::mouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
+    Engine* engine = static_cast<Engine*>(glfwGetWindowUserPointer(window));
+    
+    if (button == GLFW_MOUSE_BUTTON_MIDDLE) {
+        engine->middleMousePressed = (action == GLFW_PRESS);
+    }
+    else if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
+        double xpos, ypos;
+        glfwGetCursorPos(window, &xpos, &ypos);
+        vec2 worldPos = engine->screenToWorld(xpos, ypos);
+        
+        // Create a ray at the clicked position going to the right
+        rays.push_back(Ray(worldPos, vec2(c, 0.0f)));
+    }
+}
+
+void Engine::scrollCallback(GLFWwindow* window, double xoffset, double yoffset) {
+    Engine* engine = static_cast<Engine*>(glfwGetWindowUserPointer(window));
+    engine->zoom *= pow(1.1, yoffset);
+    engine->zoom = fmax(0.1, fmin(engine->zoom, 10.0));
+}
+
+void Engine::keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
+        glfwSetWindowShouldClose(window, GLFW_TRUE);
+    }
+    else if (key == GLFW_KEY_C && action == GLFW_PRESS) {
+        rays.clear();
+    }
+    else if (key == GLFW_KEY_SPACE && action == GLFW_PRESS) {
+        // Create a circle of rays around the black hole
+        int numRays = 16;
+        double radius = 5e10;
+        for (int i = 0; i < numRays; i++) {
+            double angle = 2.0 * M_PI * i / numRays;
+            vec2 pos = vec2(radius * cos(angle), radius * sin(angle));
+            vec2 dir = normalize(vec2(-pos.x, -pos.y)) * float(c);
+            rays.push_back(Ray(pos, dir));
+        }
+    }
+}
 
 int main () {
-    //rays.push_back(Ray(vec2(-1e11, 3.27606302719999999e10), vec2(c, 0.0f)));
+    // Start with a single ray
+    rays.push_back(Ray(vec2(-1e11, 3.27606302719999999e10), vec2(c, 0.0f)));
+    
+    std::cout << "Controls:" << std::endl;
+    std::cout << "  Left Click: Create a ray at mouse position" << std::endl;
+    std::cout << "  Middle Mouse + Drag: Pan the view" << std::endl;
+    std::cout << "  Scroll: Zoom in/out" << std::endl;
+    std::cout << "  Space: Create a circle of rays around the black hole" << std::endl;
+    std::cout << "  C: Clear all rays" << std::endl;
+    std::cout << "  ESC: Exit" << std::endl;
+    
     while(!glfwWindowShouldClose(engine.window)) {
         engine.run();
         SagA.draw();
