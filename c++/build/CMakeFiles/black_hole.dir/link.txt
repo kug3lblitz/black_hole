@@ -1,0 +1,1 @@
+/usr/bin/c++  -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/black_hole.dir/black_hole.cpp.o -o black_hole  /opt/homebrew/lib/libGLEW.dylib /opt/homebrew/lib/libglfw.dylib -framework OpenGL

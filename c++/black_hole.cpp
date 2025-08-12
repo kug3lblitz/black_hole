@@ -48,7 +48,7 @@ struct Camera {
 
     // Calculate camera position in world space
     vec3 position() const {
-        float clampedElevation = clamp(elevation, 0.01f, float(M_PI) - 0.01f);
+        float clampedElevation = glm::clamp(elevation, 0.01f, float(M_PI) - 0.01f);
         // Orbit around (0,0,0) always
         return vec3(
             radius * sin(clampedElevation) * cos(azimuth),
@@ -78,7 +78,7 @@ struct Camera {
             // Orbit: Left mouse only
             azimuth   += dx * orbitSpeed;
             elevation -= dy * orbitSpeed;
-            elevation = clamp(elevation, 0.01f, float(M_PI) - 0.01f);
+            elevation = glm::clamp(elevation, 0.01f, float(M_PI) - 0.01f);
         }
 
         lastX = x;
@@ -107,7 +107,7 @@ struct Camera {
     }
     void processScroll(double xoffset, double yoffset) {
         radius -= yoffset * zoomSpeed;
-        radius = clamp(radius, minRadius, maxRadius);
+        radius = glm::clamp(radius, minRadius, maxRadius);
         update();
     }
     void processKey(int key, int scancode, int action, int mods) {
@@ -139,13 +139,15 @@ struct ObjectData {
     vec4 posRadius; // xyz = position, w = radius
     vec4 color;     // rgb = color, a = unused
     float  mass;
-    vec3 velocity = vec3(0.0f, 0.0f, 0.0f); // Initial velocity
+    vec3 velocity;
+    ObjectData(const vec4& pr, const vec4& c, float m, const vec3& v)
+        : posRadius(pr), color(c), mass(m), velocity(v) {}
 };
 vector<ObjectData> objects = {
-    { vec4(4e11f, 0.0f, 0.0f, 4e10f)   , vec4(1,1,0,1), 1.98892e30 },
-    { vec4(0.0f, 0.0f, 4e11f, 4e10f)   , vec4(1,0,0,1), 1.98892e30 },
-    { vec4(0.0f, 0.0f, 0.0f, SagA.r_s) , vec4(0,0,0,1), SagA.mass  },
-    //{ vec4(6e10f, 0.0f, 0.0f, 5e10f), vec4(0,1,0,1) }
+    { vec4(4e11f, 0.0f, 0.0f, 4e10f), vec4(1,1,0,1), 1.98892e30, vec3(0,0,0) },
+    { vec4(0.0f, 0.0f, 4e11f, 4e10f), vec4(1,0,0,1), 1.98892e30, vec3(0,0,0) },
+    { vec4(0.0f, 0.0f, 0.0f, SagA.r_s), vec4(0,0,0,1), static_cast<float>(SagA.mass), vec3(0,0,0) },
+    //{ vec4(6e10f, 0.0f, 0.0f, 5e10f), vec4(0,1,0,1), <mass>, vec3(0,0,0) }
 };
 
 struct Engine {
@@ -170,17 +172,26 @@ struct Engine {
     int HEIGHT = 600; // Window height
     int COMPUTE_WIDTH  = 200;   // Compute resolution width
     int COMPUTE_HEIGHT = 150;  // Compute resolution height
-    float width = 100000000000.0f; // Width of the viewport in meters
-    float height = 75000000000.0f; // Height of the viewport in meters
+    float width = 2.5e11f; // Wider viewport for better coverage
+    float height = 2.5e11f; // Taller viewport for better coverage
     
+    static void error_callback(int error, const char* description) {
+        std::cerr << "GLFW Error (" << error << "): " << description << std::endl;
+    }
+
     Engine() {
+        glfwSetErrorCallback(error_callback);
+
         if (!glfwInit()) {
             cerr << "GLFW init failed\n";
             exit(EXIT_FAILURE);
         }
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+        // Use OpenGL 3.2 Core Profile for better macOS compatibility
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
         glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+        glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE); // Required on macOS
+
         window = glfwCreateWindow(WIDTH, HEIGHT, "Black Hole", nullptr, nullptr);
         if (!window) {
             cerr << "Failed to create GLFW window\n";
@@ -199,9 +210,9 @@ struct Engine {
         }
         cout << "OpenGL " << glGetString(GL_VERSION) << "\n";
         this->shaderProgram = CreateShaderProgram();
-        gridShaderProgram = CreateShaderProgram("grid.vert", "grid.frag");
+        gridShaderProgram = CreateShaderProgram("shaders/grid.vert", "shaders/grid.frag");
 
-        computeProgram = CreateComputeProgram("geodesic.comp");
+        // computeProgram = CreateComputeProgram("shaders/geodesic.comp"); // Disabled for macOS compatibility
         glGenBuffers(1, &cameraUBO);
         glBindBuffer(GL_UNIFORM_BUFFER, cameraUBO);
         glBufferData(GL_UNIFORM_BUFFER, 128, nullptr, GL_DYNAMIC_DRAW); // alloc ~128 bytes
@@ -227,45 +238,47 @@ struct Engine {
         this->texture = result[1];
     }
     void generateGrid(const vector<ObjectData>& objects) {
-        const int gridSize = 25;
-        const float spacing = 1e10f;  // tweak this
+        // Much larger grid for window coverage and visible well
+        const int gridSize = 200;
+        const float spacing = 1e12f; // MUCH larger grid
 
-        vector<vec3> vertices;
+        struct Vertex {
+            vec3 pos;
+            vec3 color;
+        };
+        vector<Vertex> vertices;
         vector<GLuint> indices;
 
+        // Black hole parameters (Sgr A*)
+        double mass = 4.3e6 * 1.98847e30; // kg
+        double r_s = 2.0 * 6.67430e-11 * mass / (2.99792458e8 * 2.99792458e8); // Schwarzschild radius
+
+        float minY = 1e12f, maxY = -1e12f;
         for (int z = 0; z <= gridSize; ++z) {
             for (int x = 0; x <= gridSize; ++x) {
                 float worldX = (x - gridSize / 2) * spacing;
                 float worldZ = (z - gridSize / 2) * spacing;
+                float dist = sqrt(worldX * worldX + worldZ * worldZ);
 
-                float y = 0.0f;
-
-                // ✅ Warp grid using Schwarzschild geometry
-                for (const auto& obj : objects) {
-                    vec3 objPos = vec3(obj.posRadius);
-                    double mass = obj.mass;
-                    double radius = obj.posRadius.w;
-
-                    double r_s = 2.0 * G * mass / (c * c);
-                    double dx = worldX - objPos.x;
-                    double dz = worldZ - objPos.z;
-                    double dist = sqrt(dx * dx + dz * dz);
-
-                    // prevent sqrt of negative or divide-by-zero (inside or at the black hole center)
-                    if (dist > r_s) {
-                        double deltaY = 2.0 * sqrt(r_s * (dist - r_s));
-                        y += static_cast<float>(deltaY) - 3e10f;
-                    } else {
-                        // 🔴 For points inside or at r_s: make it dip down sharply
-                        y += 2.0f * static_cast<float>(sqrt(r_s * r_s)) - 3e10f;  // or add a deep pit
-                    }
+                // Schwarzschild well: y = -sqrt(r_s / r) for r > r_s, else deep pit
+                float y;
+                if (dist > r_s) {
+                    y = -2.0f * sqrt(r_s * (dist - r_s));
+                } else {
+                    y = -2.0f * sqrt(r_s * r_s) - 1e13f;
                 }
+                minY = std::min(minY, y);
+                maxY = std::max(maxY, y);
 
-                vertices.emplace_back(worldX, y, worldZ);
+                // Color by height: deep = black, high = white
+                float normY = (y - minY) / (maxY - minY + 1e-6f);
+                vec3 color = glm::mix(vec3(0.0f, 0.0f, 0.0f), vec3(1.0f, 1.0f, 1.0f), normY);
+
+                vertices.push_back({vec3(worldX, y, worldZ), color});
             }
         }
 
-        // 🧩 Add indices for GL_LINE rendering
+        // Indices for GL_LINE rendering
         for (int z = 0; z < gridSize; ++z) {
             for (int x = 0; x < gridSize; ++x) {
                 int i = z * (gridSize + 1) + x;
@@ -277,7 +290,7 @@ struct Engine {
             }
         }
 
-        // 🔌 Upload to GPU
+        // Upload to GPU
         if (gridVAO == 0) glGenVertexArrays(1, &gridVAO);
         if (gridVBO == 0) glGenBuffers(1, &gridVBO);
         if (gridEBO == 0) glGenBuffers(1, &gridEBO);
@@ -285,13 +298,16 @@ struct Engine {
         glBindVertexArray(gridVAO);
 
         glBindBuffer(GL_ARRAY_BUFFER, gridVBO);
-        glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(vec3), vertices.data(), GL_DYNAMIC_DRAW);
+        glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), vertices.data(), GL_DYNAMIC_DRAW);
 
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gridEBO);
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(GLuint), indices.data(), GL_STATIC_DRAW);
 
-        glEnableVertexAttribArray(0); // location = 0
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(vec3), (void*)0);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0);
+
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, color));
 
         gridIndexCount = indices.size();
 
@@ -299,7 +315,7 @@ struct Engine {
     }
     void drawGrid(const mat4& viewProj) {
         glUseProgram(gridShaderProgram);
-        glUniformMatrix4fv(glGetUniformLocation(gridShaderProgram, "viewProj"),
+        glUniformMatrix4fv(glGetUniformLocation(gridShaderProgram, "uViewProj"),
                         1, GL_FALSE, glm::value_ptr(viewProj));
         glBindVertexArray(gridVAO);
 
@@ -369,7 +385,14 @@ struct Engine {
             std::ifstream in(path);
             if (!in.is_open()) {
                 std::cerr << "Failed to open shader: " << path << "\n";
-                exit(EXIT_FAILURE);
+                // Try ../shaders/ if not found
+                std::string altPath = std::string("../") + path;
+                std::cerr << "Trying alternate path: " << altPath << "\n";
+                in.open(altPath);
+                if (!in.is_open()) {
+                    std::cerr << "Failed to open shader at alternate path: " << altPath << "\n";
+                    exit(EXIT_FAILURE);
+                }
             }
             std::stringstream ss;
             ss << in.rdbuf();
@@ -422,7 +445,14 @@ struct Engine {
         std::ifstream in(path);
         if(!in.is_open()) {
             std::cerr << "Failed to open compute shader: " << path << "\n";
-            exit(EXIT_FAILURE);
+            // Try ../shaders/ if not found
+            std::string altPath = std::string("../") + path;
+            std::cerr << "Trying alternate path: " << altPath << "\n";
+            in.open(altPath);
+            if (!in.is_open()) {
+                std::cerr << "Failed to open compute shader at alternate path: " << altPath << "\n";
+                exit(EXIT_FAILURE);
+            }
         }
         std::stringstream ss;
         ss << in.rdbuf();
@@ -688,15 +718,17 @@ int main() {
         // ---------- GRID ------------- //
         // 2) rebuild grid mesh on CPU
         engine.generateGrid(objects);
-        // 5) overlay the bent grid
+
+        // Restore interactive camera controls for mouse movement
+        camera.update();
         mat4 view = lookAt(camera.position(), camera.target, vec3(0,1,0));
-        mat4 proj = perspective(radians(60.0f), float(engine.COMPUTE_WIDTH)/engine.COMPUTE_HEIGHT, 1e9f, 1e14f);
+        mat4 proj = perspective(radians(90.0f), float(engine.WIDTH)/engine.HEIGHT, 1e11f, 1e14f);
         mat4 viewProj = proj * view;
         engine.drawGrid(viewProj);
 
         // ---------- RUN RAYTRACER ------------- //
         glViewport(0, 0, engine.WIDTH, engine.HEIGHT);
-        engine.dispatchCompute(camera);
+        // engine.dispatchCompute(camera); // Disabled for macOS compatibility
         engine.drawFullScreenQuad();
 
         // 6) present to screen
